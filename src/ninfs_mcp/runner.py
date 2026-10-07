@@ -167,9 +167,11 @@ def wait_ready(
     proc: Any,
     mount_point: str,
     check: Callable[[], bool],
-    timeout_s: float = READY_TIMEOUT_S,
+    timeout_s: float | None = None,
 ) -> None:
     """Wait until the mount serves content. Raises RunnerError (no cleanup)."""
+    if timeout_s is None:
+        timeout_s = READY_TIMEOUT_S
     deadline = time.monotonic() + timeout_s
     while True:
         if proc.poll() is not None:
