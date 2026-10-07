@@ -1,2 +1,0 @@
-[console_scripts]
-ninfs-mcp = ninfs_mcp.server:main
