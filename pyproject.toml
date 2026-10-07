@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ninfs-mcp"
+version = "0.1.0"
+description = "MCP server wrapping ninfs CLI for 3DS SD/title/ExeFS inspection (Windows, read-only)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "mcp==2.3.0",
+    "ninfs==2.0",
+    "pyctr==0.7.6",
+    "anyio>=4.0",
+]
+# pyctr is a transitive dep of ninfs; pinned to the spike-verified 0.7.6.
+
+[project.optional-dependencies]
+test = [
+    "pytest==9.1.1",
+]
+
+[project.scripts]
+ninfs-mcp = "ninfs_mcp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
