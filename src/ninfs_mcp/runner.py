@@ -11,8 +11,10 @@ server.py (Task 5).
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -22,7 +24,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from .policy import check_no_overlap, get_secrets, sanitize
+from .policy import check_no_overlap, get_secrets, resolve_dest, sanitize
 
 _TITLE_ID_RE = re.compile(r"[0-9a-fA-F]{16}")
 
@@ -45,6 +47,7 @@ STOP_WAIT_S = 10.0
 _LOCK = threading.RLock()
 _SESSIONS: dict[str, MountSession] = {}
 _RESIDUALS: list[InternalMount] = []
+CANCEL_CHECK: Callable[[], None] = lambda: None
 
 
 class RunnerError(Exception):
@@ -55,6 +58,14 @@ class RunnerError(Exception):
         self.code = code
         self.message_sanitized = message_sanitized
         self.incomplete = incomplete
+
+
+class CancelRequested(Exception):
+    """Cooperative cancellation signal for checkpoints."""
+
+
+def _cancel_point() -> None:
+    CANCEL_CHECK()
 
 
 @dataclass
@@ -463,8 +474,66 @@ def find_title(session: MountSession, title_id: str) -> TitleHandle:
         return handle
 
 
-def extract_code(handle: TitleHandle, dest_rel: str) -> ExtractResult:  # noqa: ARG001
-    raise NotImplementedError
+def extract_code(handle: TitleHandle, dest_rel: str) -> ExtractResult:
+    """Copy code-decompressed.bin to the workspace atomically. Internal type."""
+    with _LOCK:
+        session = _SESSIONS.get(handle.mount_id)
+        if session is None or handle.handle_id not in session.title_handles:
+            raise RunnerError("unknown-handle", "unknown or expired title handle")
+        secrets = get_secrets([session.sd_root])
+        exefs_mp = None
+        for child in session.children:
+            if child.handle_id == handle.handle_id and child.kind == "exefs":
+                exefs_mp = child.mount_point
+                break
+        if exefs_mp is None:
+            session.title_handles.pop(handle.handle_id, None)
+            raise RunnerError("mounts-gone", sanitize("exefs mount is gone", secrets))
+
+        def _burned(error: RunnerError) -> RunnerError:
+            session.title_handles.pop(handle.handle_id, None)
+            return error
+
+        tmp_path = None
+        try:
+            _cancel_point()
+            dest = resolve_dest(_workspace(), dest_rel, secrets)
+            _cancel_point()
+            src = os.path.join(exefs_mp, "code-decompressed.bin")
+            if not os.path.isfile(src):
+                raise RunnerError("code-missing",
+                                  sanitize("code-decompressed.bin is absent", secrets))
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            tmp_path = os.path.join(
+                os.path.dirname(str(dest)),
+                os.path.basename(str(dest)) + f".tmp-{uuid.uuid4().hex[:8]}")
+            _cancel_point()  # pre-replace boundary: cancel keeps the old file
+            shutil.copyfile(src, tmp_path)
+            digest = hashlib.sha256()
+            with open(tmp_path, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    digest.update(chunk)
+            os.replace(tmp_path, dest)
+            tmp_path = None
+        except CancelRequested as e:
+            raise _burned(RunnerError("cancelled", sanitize(f"cancelled: {e}", secrets)))
+        except RunnerError as e:
+            raise _burned(RunnerError(e.code, sanitize(e.message_sanitized, secrets),
+                                      e.incomplete))
+        except Exception as e:  # noqa: BLE001 - convert to sanitized contract
+            raise _burned(RunnerError("extract-failed", sanitize(f"{type(e).__name__}", secrets)))
+        except BaseException:
+            session.title_handles.pop(handle.handle_id, None)
+            raise
+        finally:
+            if tmp_path is not None:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+        size = os.path.getsize(str(dest))
+        return ExtractResult(dest_path=str(dest), size=size,
+                             sha256=digest.hexdigest(), code_entry="code-decompressed.bin")
 
 
 def _mount_args(kind: str, inputs: list[str], mount_point: str, extra: list[str]) -> list[str]:

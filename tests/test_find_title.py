@@ -9,7 +9,12 @@ import struct
 import pytest
 
 from ninfs_mcp import runner
-from ninfs_mcp.runner import InternalMount, MountSession, RunnerError
+from ninfs_mcp.runner import (
+    CancelRequested,
+    InternalMount,
+    MountSession,
+    RunnerError,
+)
 from test_runner import FakePopen
 
 STAGE = {"sdtitle": set(), "ncch": set(), "exefs": set()}
@@ -84,8 +89,17 @@ def fake_mount_fs(monkeypatch):
             return FAKE_SIZES[base]
         return real_getsize(path)
 
+    real_isfile = os.path.isfile
+
+    def fake_isfile(path):
+        kind = _kind_of(path)
+        if kind is not None and _live(path):
+            return os.path.basename(path) in STAGE[kind]
+        return real_isfile(path)
+
     monkeypatch.setattr(os, "listdir", fake_listdir)
     monkeypatch.setattr(os.path, "exists", fake_exists)
+    monkeypatch.setattr(os.path, "isfile", fake_isfile)
     monkeypatch.setattr(os.path, "getsize", fake_getsize)
     monkeypatch.setattr(runner, "READY_TIMEOUT_S", 0.05)
 
@@ -267,6 +281,145 @@ def test_find_title_explicit_update_states(tmp_path):
     with pytest.raises(RunnerError):  # update present but broken: no base fallback
         runner.find_title(session, UPDATE)
     assert FakePopen.instances == []
+
+
+def _sd_session_with_handle(tmp_path, monkeypatch):
+    """Full find_title success; returns (session, handle)."""
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    monkeypatch.setenv("NINFS_WORKSPACE", str(ws))
+    sdroot = tmp_path / "sd"
+    _title_content(str(sdroot), "id1", "00040000", "0016c700",
+                   [("a.tmd", 5, [("abcdef01", 10, True)])])
+    session = _session(tmp_path, str(sdroot))
+    return session, runner.find_title(session, BASE)
+
+
+def _serve_code(session, handle, data=b"decompressed-code-bytes"):
+    """Materialize the served code-decompressed.bin the fake mount advertises."""
+    for m in session.children:
+        if m.handle_id == handle.handle_id and m.kind == "exefs":
+            path = os.path.join(m.mount_point, "code-decompressed.bin")
+            with open(path, "wb") as f:
+                f.write(data)
+            return path
+    raise AssertionError("no exefs mount for handle")
+
+
+def test_extract_code_requires_decompressed_entry(tmp_path, monkeypatch):
+    session, handle = _sd_session_with_handle(tmp_path, monkeypatch)
+    STAGE["exefs"] = {"code.bin"}  # served, but no success evidence
+    with pytest.raises(RunnerError) as exc:
+        runner.extract_code(handle, "akaneko/code.bin")
+    assert exc.value.code == "code-missing"
+    with pytest.raises(RunnerError):  # handle burned
+        runner.extract_code(handle, "akaneko/code.bin")
+
+
+def test_extract_code_atomic_overwrite_and_tmp_cleanup(tmp_path, monkeypatch):
+    session, handle = _sd_session_with_handle(tmp_path, monkeypatch)
+    _serve_code(session, handle)
+    ws = tmp_path / "ws"
+    dest = ws / "akaneko" / "code.bin"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(b"old")
+    out = runner.extract_code(handle, "akaneko/code.bin")
+    assert out.dest_path == str(dest)
+    assert dest.read_bytes() != b"old"
+    leftovers = [p for p in dest.parent.iterdir() if ".tmp-" in p.name]
+    assert leftovers == []
+    # copy failure: tmp removed, old file kept, handle burned
+    session2, handle2 = _sd_session_with_handle(tmp_path, monkeypatch)
+    _serve_code(session2, handle2)
+    import shutil
+
+    real_copy = shutil.copyfile
+    monkeypatch.setattr(shutil, "copyfile", lambda *a, **k: (_ for _ in ()).throw(OSError("disk")))
+    with pytest.raises(RunnerError):
+        runner.extract_code(handle2, "akaneko/code.bin")
+    assert dest.read_bytes() != b"old"  # first copy still intact
+    assert [p for p in dest.parent.iterdir() if ".tmp-" in p.name] == []
+    assert real_copy is not None
+    with pytest.raises(RunnerError):
+        runner.extract_code(handle2, "akaneko/code.bin")
+
+
+def test_extract_code_cancel_before_copy(tmp_path, monkeypatch):
+    session, handle = _sd_session_with_handle(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(runner, "CANCEL_CHECK", lambda: calls.append(1) or (_ for _ in ()).throw(CancelRequested()))
+    with pytest.raises(RunnerError) as exc:
+        runner.extract_code(handle, "akaneko/code.bin")
+    assert exc.value.code == "cancelled"
+    assert list((tmp_path / "ws").rglob("*.tmp-*")) == []
+    with pytest.raises(RunnerError):  # handle burned
+        runner.extract_code(handle, "akaneko/code.bin")
+
+
+def test_extract_code_cancel_before_replace_keeps_old(tmp_path, monkeypatch):
+    session, handle = _sd_session_with_handle(tmp_path, monkeypatch)
+    _serve_code(session, handle)
+    ws = tmp_path / "ws"
+    dest = ws / "keep.bin"
+    dest.write_bytes(b"old")
+    calls = []
+
+    def tripwire():
+        calls.append(1)
+        if len(calls) == 3:  # resolve, pre-copy, pre-replace
+            raise CancelRequested()
+
+    monkeypatch.setattr(runner, "CANCEL_CHECK", tripwire)
+    with pytest.raises(RunnerError) as exc:
+        runner.extract_code(handle, "keep.bin")
+    assert exc.value.code == "cancelled"
+    assert dest.read_bytes() == b"old"
+    assert list(ws.rglob("*.tmp-*")) == []
+
+
+def test_extract_code_happy_path_reuse_and_invalidation(tmp_path, monkeypatch):
+    import hashlib
+
+    session, handle = _sd_session_with_handle(tmp_path, monkeypatch)
+    _serve_code(session, handle)
+    out = runner.extract_code(handle, "akaneko/code.bin")
+    assert out.code_entry == "code-decompressed.bin"
+    data = (tmp_path / "ws" / "akaneko" / "code.bin").read_bytes()
+    assert out.size == len(data)
+    assert out.sha256 == hashlib.sha256(data).hexdigest()
+    out2 = runner.extract_code(handle, "akaneko/code2.bin")  # reusable
+    assert out2.sha256 == out.sha256
+    import shutil
+
+    shutil.rmtree(tmp_path / "sd" / "id1")  # emulate FUSE unmount
+    for m in session.children:  # served bytes vanish with the mount
+        if m.kind == "exefs":
+            served = os.path.join(m.mount_point, "code-decompressed.bin")
+            if os.path.exists(served):
+                os.remove(served)
+    assert runner.unmount("S").ok is True
+    with pytest.raises(RunnerError):
+        runner.extract_code(handle, "akaneko/code3.bin")
+
+
+def test_extract_code_failure_isolation_across_handles(tmp_path, monkeypatch):
+    sdroot = tmp_path / "sd"
+    _title_content(str(sdroot), "id1", "00040000", "0016c700",
+                   [("a.tmd", 5, [("abcdef01", 10, True)])])
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    monkeypatch.setenv("NINFS_WORKSPACE", str(ws))
+    session = _session(tmp_path, str(sdroot))
+    h1 = runner.find_title(session, BASE)
+    h2 = runner.find_title(session, BASE)
+    _serve_code(session, h1)
+    for m in session.children:  # kill h2's exefs mount only
+        if m.handle_id == h2.handle_id and m.kind == "exefs":
+            m.proc.terminate()
+    with pytest.raises(RunnerError):
+        runner.extract_code(h2, "b.bin")
+    out = runner.extract_code(h1, "a.bin")  # h1 unaffected
+    assert out.code_entry == "code-decompressed.bin"
 
 
 def test_find_title_multi_handle_coexistence(tmp_path):
