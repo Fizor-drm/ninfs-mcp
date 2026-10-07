@@ -1,0 +1,7 @@
+mcp==2.3.0
+ninfs==2.0
+pyctr==0.7.6
+anyio>=4.0
+
+[test]
+pytest==9.1.1

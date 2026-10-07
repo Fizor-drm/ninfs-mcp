@@ -91,6 +91,11 @@ def test_overlap_guard_rejects_sd_overlap_and_secret_target(tmp_path, monkeypatc
         resolve_dest(ws, "boot9.bin", secrets=get_secrets())
 
 
+def test_overlap_guard_allows_disjoint_drives():
+    # Pure path check: different drives can never overlap.
+    check_no_overlap("C:\\work\\ws", "D:\\Nintendo 3DS")
+
+
 def test_get_secrets_collects_env_and_extra(monkeypatch):
     monkeypatch.setenv("NINFS_BOOT9_PATH", "C:\\k\\boot9.bin")
     monkeypatch.setenv("NINFS_MOVABLE_PATH", "C:\\k\\movable.sed")

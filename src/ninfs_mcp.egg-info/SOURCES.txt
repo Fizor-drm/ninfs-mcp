@@ -1,0 +1,10 @@
+LICENSE
+README.md
+pyproject.toml
+src/ninfs_mcp/__init__.py
+src/ninfs_mcp.egg-info/PKG-INFO
+src/ninfs_mcp.egg-info/SOURCES.txt
+src/ninfs_mcp.egg-info/dependency_links.txt
+src/ninfs_mcp.egg-info/entry_points.txt
+src/ninfs_mcp.egg-info/requires.txt
+src/ninfs_mcp.egg-info/top_level.txt

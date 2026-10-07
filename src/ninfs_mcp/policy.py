@@ -92,6 +92,8 @@ def check_no_overlap(workspace: Path, sd_root: str) -> None:
     """Refuse any overlap between workspace and the selected SD area."""
     ws_real = os.path.realpath(workspace)
     sd_real = os.path.realpath(sd_root)
+    if os.path.splitdrive(ws_real)[0].lower() != os.path.splitdrive(sd_real)[0].lower():
+        return  # different drives (or UNC shares) can never overlap
     if ws_real == sd_real or os.path.commonpath([ws_real, sd_real]) in (ws_real, sd_real):
         raise ValueError("workspace overlaps the selected SD area")
 
