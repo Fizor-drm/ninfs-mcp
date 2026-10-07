@@ -24,6 +24,7 @@
 - 接続: stdio (ローカル起動)
 - ninfs 利用: CLI entry point の subprocess ラッパー (`mount_sd`, `mount_sdtitle`, `mount_ncch`, `mount_exefs`, `mount_romfs`)
 - 秘密ファイル: env のパスのみ (`NINFS_BOOT9_PATH`, `NINFS_MOVABLE_PATH`, 任意で `NINFS_SD_ROOT`)、中身非開示
+- 作業場所: `NINFS_WORKSPACE` (必須の絶対パス。存在しなければ作成する)
 - 依存バージョンは `pyproject.toml` に pin し、採用版の CLI 引数 (`--decompress-code` 等) と出力名を実装時に照合する
 
 ## 3. 採用構成 (A案・最小)
@@ -79,12 +80,15 @@ MountSession (mount_id)
 - 途中失敗時 (例: `ncch` 成功後に `exefs` 失敗) は確保済み分を逆順で破棄し、`title_handle` を発行しない。
 - `unmount(mount_id)` は公開 ID を即無効化した上で逆順 cleanup し、失敗残存があれば `incomplete: true` で返す。
 
-### subprocess 隔離契約
+### subprocess 隔離契約 (long-lived mount プロセス)
 
-- stdio MCP の stdout を壊さないため、子プロセスの stdout/stderr は必ずパイプ capture し、継承 (`inherit`) しない。
-- stdout は破棄する (ninfs の `ID0:` / `Key:` 行を含むため、ログにも残さない)。
-- stderr は要約 + 共通 sanitizer 適用後のみログ・MCP 応答へ渡す。
-- 復号キー・秘密パスはメモリ保持を最小化し、永続化しない。
+ninfs の各 mount CLI は FUSE の foreground 動作でブロックする常駐プロセスであり、解除はプロセス終了 (Ctrl+C 相当) で行う。そのため run-to-completion (`communicate` 待ち) は使わない。契約は以下とする:
+
+- 起動: `Popen(argv, stdout=DEVNULL, stderr=PIPE, stdin=DEVNULL)`。継承しない。stdout は DEVNULL へ捨てる (`ID0:` / `Key:` 行をどこにも残さない)。
+- 利用可能確認: mount_point のポーリング (200ms間隔・上限10秒) で読み取り可能になったら成功とする。
+- 失敗時: stderr を回収し、共通 sanitizer 適用後の要約 (末尾2000字) のみ返す。
+- 解除: `terminate()` → 待機 → 残存すれば `kill()`。タイムアウト時も同じ手順の後に逆順 cleanup する。
+- MCP 終了時は全残存プロセスに同手順を適用する。
 
 ## 4. データフロー
 
@@ -104,8 +108,8 @@ unmount(mount_id) (逆順cleanup, 残存はincomplete報告)
 - 全 mount は read-only 強制。SD への write API は作らない。
 - `boot9.bin` / `movable.sed` の中身・SD復号キーを返さない。`ID0:` / `Key:` 行はログにも残さない。
 - 共通 sanitizer をログ・MCP 応答・subprocess stderr 要約の全経路に通す。env パス・SD フルパスが ninfs の stderr に含まれてもマスクしてから返す。
-- コピー先は専用 workspace 配下のみ。正規化後のパスが workspace 配下かで判定する (`Path.resolve()` + `is_relative_to`)。文字列検査のみに頼らない。
-- 拒否対象: `..`、絶対パス、ドライブ指定 (`C:...`)、`C:foo`、ルート相対 (`\foo`)、UNC (`\\server\share`)、`/` と `\` の混在、symlink/junction 経由の脱出。
+- コピー先は専用 workspace 配下のみ。`NINFS_WORKSPACE` は必須の絶対パスとし、存在しなければ作成する。判定は二段構えとする: (a) 形式拒否 (`..` 成分、絶対パス、ドライブ指定 `C:...` / `C:foo`、ルート相対 `\foo`、UNC、デバイスパス `\\?\` `\\.\`)、(b) 正規化後の包含確認 (`Path.resolve()` + `is_relative_to`)。Windows の `/` と `\` の混在自体は正常な相対パスとして許容し、(b) で判定する。
+- 拒否対象: `..` 成分、絶対パス、ドライブ指定 (`C:...`)、`C:foo`、ルート相対 (`\foo`)、UNC (`\\server\share`)、デバイスパス、symlink/junction 経由の脱出。
 - mount ごとに `mount_id` をサーバー発行する。呼び出し側指定は不可。
 - MCP 終了時に残存 mount を cleanup する。
 - 元 ROM / SD データの削除 API は作らない。
@@ -118,12 +122,13 @@ unmount(mount_id) (逆順cleanup, 残存はincomplete報告)
 - WinFsp 不在、SD 不在、Title 不在は検出順に早期リターンする。
 - `detect_sd` 複数候補は `ambiguous` エラーとし、先頭の勝手採用はしない。
 - 展開失敗時 (`.code` 展開エラー) は `extract_code` をエラーとし、対象エントリ名と sanitizer 済み理由を返す。
-- タイムアウト時はプロセス kill 後に逆順 unmount する。
+- タイムアウト時は `terminate()` → 残存すれば `kill()` の後に逆順 unmount する。
 
 ## 7. テスト
 - `tests/test_policy.py`:
   1. traversal 拒否 (`..` を含む相対パス)
-  2. workspace 外拒否 (絶対パス、ドライブ指定、`C:foo`、`\foo`、UNC、`/` `\` 混在)
+  2. workspace 外拒否 (絶対パス、ドライブ指定、`C:foo`、`\foo`、UNC、デバイスパス。`/` `\` 混在の正常相対パスは許容)
+  2b. 形式拒否の単独検証 (`..` 成分を含むが正規化後は内側に収まる入力も拒否する)
   3. symlink/junction 解決後の workspace 外拒否
   4. 秘密中身非露出 + sanitizer (ログ・応答の両方でパス・キーがマスクされる、stdout破棄)
   5. read-only 強制 (write フラグを受け付けない)
