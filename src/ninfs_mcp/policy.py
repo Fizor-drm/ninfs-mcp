@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import re
+import unicodedata
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -48,7 +49,7 @@ def _reject_format(dest_rel: str) -> None:
             raise ValueError(f"stream/device syntax is never allowed: {part!r}")
         if part != part.strip(" .") or part[-1] in (" ", "."):
             raise ValueError(f"trailing dot/space is never allowed: {part!r}")
-        stem = part.split(".", 1)[0].upper()
+        stem = unicodedata.normalize("NFKC", part).split(".", 1)[0].upper()
         if stem in _WINDOWS_RESERVED:
             raise ValueError(f"reserved device name: {part!r}")
 
@@ -70,9 +71,13 @@ def resolve_dest(
     candidate = os.path.realpath(os.path.join(ws_real, *_split_components(dest_rel)))
     if os.path.commonpath([ws_real, candidate]) != ws_real:
         raise ValueError("escapes workspace after normalization")
-    mounts = os.path.join(ws_real, ".mounts")
-    if candidate == mounts or os.path.commonpath([mounts, candidate]) == mounts:
-        raise ValueError("reserved staging area: .mounts")
+    # Reserved staging area, compared in both resolved and lexical form so a
+    # junction at .mounts cannot smuggle writes into the managed area.
+    mounts_resolved = os.path.realpath(os.path.join(ws_real, ".mounts"))
+    mounts_lexical = os.path.join(ws_real, ".mounts")
+    for mounts in (mounts_resolved, mounts_lexical):
+        if candidate == mounts or os.path.commonpath([mounts, candidate]) == mounts:
+            raise ValueError("reserved staging area: .mounts")
     if secrets is None:
         secrets = get_secrets()
     for secret in secrets:
@@ -113,11 +118,15 @@ def get_secrets(extra: Iterable[str] = ()) -> list[str]:
 
 
 def sanitize(text: str, secrets: Iterable[str]) -> str:
-    """Mask secret paths, key material and ID0 values. secrets is required."""
+    """Mask secret paths, key material and ID0 values. secrets is required.
+
+    Also masks backslash-doubled (traceback/repr) spellings of secrets.
+    """
     out = text
     for secret in secrets:
         if secret:
             out = out.replace(secret, "[redacted-path]")
+            out = out.replace(secret.replace("\\", "\\\\"), "[redacted-path]")
     out = _KEY_RE.sub("[redacted-key]", out)
     out = _ID0_RE.sub("ID0: [redacted-id0]", out)
     return out

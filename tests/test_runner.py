@@ -338,8 +338,41 @@ def test_retry_residuals_recovers(tmp_path):
     assert runner._RESIDUALS == []
 
 
+def test_residuals_keep_creation_order(tmp_path):
+    a = _mount(kind="sd", tmp=tmp_path)
+    b = _mount(kind="exefs", tmp=tmp_path)
+    for m in (a, b):
+        os.makedirs(m.mount_point, exist_ok=True)
+        with open(os.path.join(m.mount_point, "leftover.bin"), "wb") as f:
+            f.write(b"x")
+    residuals = runner.cleanup_core([a, b])
+    assert [m.kind for m in residuals] == ["sd", "exefs"]
+
+
 def test_lock_serializes_ops():
     assert runner._LOCK is not None
     acquired = runner._LOCK.acquire(blocking=False)
     assert acquired is True
     runner._LOCK.release()
+
+
+def test_readiness_stderr_auto_path_masked(monkeypatch, tmp_path):
+    """Auto-detected SD path leaking via ninfs stderr is masked (I6 case)."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    sd = tmp_path / "autoSD" / "Nintendo 3DS"
+    sd.mkdir(parents=True)
+    monkeypatch.setenv("NINFS_WORKSPACE", str(ws))
+    monkeypatch.setenv("NINFS_SD_ROOT", str(sd))
+    monkeypatch.setattr(runner, "READY_TIMEOUT_S", 0.05)
+    leak = f"ninfs: cannot open {sd}".encode()
+
+    def factory(argv, **kwargs):
+        kwargs["stderr_bytes"] = leak
+        return FakePopen(argv, **kwargs)
+
+    monkeypatch.setattr(runner.subprocess, "Popen", factory)
+    monkeypatch.setattr(os, "listdir", lambda p: (_ for _ in ()).throw(OSError("nope")))
+    with pytest.raises(RunnerError) as exc:
+        runner.mount_sd()
+    assert str(sd) not in exc.value.message_sanitized

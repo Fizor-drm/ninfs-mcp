@@ -117,6 +117,27 @@ def test_sanitize_masks_paths_keys_id0():
     assert "0123abcd" not in out
 
 
+def test_sanitize_masks_escaped_paths():
+    # Traceback/repr form keeps doubled backslashes as literal characters.
+    raw = "No such file: 'C:\\\\review-key\\\\movable.sed'"
+    out = sanitize(raw, ["C:\\review-key\\movable.sed"])
+    assert "review-key" not in out
+
+
+def test_resolve_dest_rejects_mounts_via_junction_target(tmp_path):
+    ws = tmp_path / "ws"
+    (ws / "exports").mkdir(parents=True)
+    _make_link(ws / ".mounts", ws / "exports")
+    with pytest.raises(ValueError):
+        resolve_dest(ws, "exports/abc/code.bin")
+
+
+def test_resolve_dest_rejects_superscript_reserved(tmp_path):
+    for evil in ["COM¹.bin", "LPT².bin", "nul.txt"]:
+        with pytest.raises(ValueError):
+            resolve_dest(tmp_path, evil)
+
+
 def test_reject_write_args():
     for extra in [{"rw": True}, {"writable": 1}, {"read_only": False}, {"ro": False}]:
         with pytest.raises(ValueError):

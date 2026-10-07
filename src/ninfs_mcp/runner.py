@@ -232,7 +232,11 @@ def stop_proc(mount: InternalMount) -> bool:
 
 
 def cleanup_core(mounts: list[InternalMount]) -> list[InternalMount]:
-    """Reverse-order best-effort cleanup. Returns un-cleanable residuals."""
+    """Reverse-order best-effort cleanup.
+
+    Returns un-cleanable residuals in the input (creation) order so the next
+    retry cleans child-before-parent again.
+    """
     residuals: list[InternalMount] = []
     for mount in reversed(mounts):
         try:
@@ -241,6 +245,7 @@ def cleanup_core(mounts: list[InternalMount]) -> list[InternalMount]:
             cleaned = False
         if not cleaned:
             residuals.append(mount)
+    residuals.reverse()
     return residuals
 
 
@@ -467,6 +472,25 @@ def find_title(session: MountSession, title_id: str) -> TitleHandle:
                 if m not in _RESIDUALS:
                     _RESIDUALS.append(m)
             raise RunnerError(e.code, sanitize(e.message_sanitized, secrets), bool(leftovers))
+        except Exception as e:  # noqa: BLE001 - e.g. spawn OSError
+            leftovers = cleanup_core(created)
+            for m in created:
+                if m in session.children:
+                    session.children.remove(m)
+            for m in leftovers:
+                if m not in _RESIDUALS:
+                    _RESIDUALS.append(m)
+            raise RunnerError("mount-failed", sanitize(f"{type(e).__name__}: {e}", secrets),
+                              bool(leftovers))
+        except BaseException:  # Cancelled etc: clean up, propagate unchanged
+            leftovers = cleanup_core(created)
+            for m in created:
+                if m in session.children:
+                    session.children.remove(m)
+            for m in leftovers:
+                if m not in _RESIDUALS:
+                    _RESIDUALS.append(m)
+            raise
         handle = TitleHandle(handle_id=handle_id, mount_id=session.mount_id,
                              requested_title_id=tid, resolved_title_id=resolved, kind=kind,
                              tmd_found=True, tmd_path=tmd_path)
@@ -507,12 +531,12 @@ def extract_code(handle: TitleHandle, dest_rel: str) -> ExtractResult:
             tmp_path = os.path.join(
                 os.path.dirname(str(dest)),
                 os.path.basename(str(dest)) + f".tmp-{uuid.uuid4().hex[:8]}")
-            _cancel_point()  # pre-replace boundary: cancel keeps the old file
             shutil.copyfile(src, tmp_path)
             digest = hashlib.sha256()
             with open(tmp_path, "rb") as f:
                 for chunk in iter(lambda: f.read(1 << 20), b""):
                     digest.update(chunk)
+            _cancel_point()  # pre-replace boundary: cancel keeps the old file
             os.replace(tmp_path, dest)
             tmp_path = None
         except CancelRequested as e:
@@ -572,7 +596,11 @@ def mount_sd() -> MountSession:
         try:
             wait_ready(proc, staging, lambda: len(os.listdir(staging)) > 0)
         except RunnerError as e:
-            if stop_proc(mount):
+            try:
+                cleaned = stop_proc(mount)
+            except Exception:
+                cleaned = False
+            if cleaned:
                 raise RunnerError(e.code, sanitize(e.message_sanitized, ctx.secrets))
             mount.session_id = "pending"
             _RESIDUALS.append(mount)

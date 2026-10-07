@@ -375,6 +375,7 @@ def test_extract_code_cancel_before_replace_keeps_old(tmp_path, monkeypatch):
     assert exc.value.code == "cancelled"
     assert dest.read_bytes() == b"old"
     assert list(ws.rglob("*.tmp-*")) == []
+    assert calls == [1, 1, 1]  # copy ran, replace did not
 
 
 def test_extract_code_happy_path_reuse_and_invalidation(tmp_path, monkeypatch):
@@ -420,6 +421,46 @@ def test_extract_code_failure_isolation_across_handles(tmp_path, monkeypatch):
         runner.extract_code(h2, "b.bin")
     out = runner.extract_code(h1, "a.bin")  # h1 unaffected
     assert out.code_entry == "code-decompressed.bin"
+
+
+def test_find_title_spawn_oserror_cleans_up(tmp_path, monkeypatch):
+    sdroot = tmp_path / "sd"
+    _title_content(str(sdroot), "id1", "00040000", "0016c700",
+                   [("a.tmd", 5, [("abcdef01", 10, True)])])
+    session = _session(tmp_path, str(sdroot))
+    real_spawn = runner.spawn_mount
+    calls = []
+
+    def flaky(argv):
+        calls.append(argv[3])
+        if argv[3] == "ncch":
+            raise OSError("exec missing")
+        return real_spawn(argv)
+
+    monkeypatch.setattr(runner, "spawn_mount", flaky)
+    with pytest.raises(RunnerError):
+        runner.find_title(session, BASE)
+    assert session.title_handles == {}
+    assert [m.kind for m in session.children] == ["sd"]  # sdtitle cleaned
+    sdtitle_procs = [p for p in FakePopen.instances if "sdtitle" in p.argv]
+    assert all(p.poll() is not None for p in sdtitle_procs)
+
+
+def test_mount_stop_failure_tracked_residual(monkeypatch, tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    n3ds = tmp_path / "Nintendo 3DS"
+    n3ds.mkdir()
+    monkeypatch.setenv("NINFS_WORKSPACE", str(ws))
+    monkeypatch.setattr(runner, "_drives", lambda: [str(tmp_path)])
+    monkeypatch.setattr(runner, "READY_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(os, "listdir", lambda p: (_ for _ in ()).throw(OSError("nope")))
+    monkeypatch.setattr(runner, "stop_proc", lambda m: (_ for _ in ()).throw(RuntimeError("stuck")))
+    with pytest.raises(RunnerError) as exc:
+        runner.mount_sd()
+    assert exc.value.incomplete is True
+    assert len(runner._RESIDUALS) == 1
+    assert runner._RESIDUALS[0].proc.poll() is None  # still alive, now tracked
 
 
 def test_find_title_multi_handle_coexistence(tmp_path):
