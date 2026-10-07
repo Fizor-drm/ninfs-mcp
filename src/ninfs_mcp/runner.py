@@ -12,6 +12,7 @@ server.py (Task 5).
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -22,6 +23,18 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .policy import check_no_overlap, get_secrets, sanitize
+
+_TITLE_ID_RE = re.compile(r"[0-9a-fA-F]{16}")
+
+# sig-type: (sig-size, padding), mirrored from pyctr (reference only).
+_SIG_SIZES = {
+    0x00010000: (0x200, 0x3C),
+    0x00010001: (0x100, 0x3C),
+    0x00010002: (0x3C, 0x40),
+    0x00010003: (0x200, 0x3C),
+    0x00010004: (0x100, 0x3C),
+    0x00010005: (0x3C, 0x40),
+}
 
 READY_TIMEOUT_S = 10.0
 READY_INTERVAL_S = 0.2
@@ -285,8 +298,169 @@ def _check_staging_area(workspace: str, staging: str, secrets: list[str]) -> Non
         node = parent
 
 
-def find_title(session: MountSession, title_id: str) -> TitleHandle:  # noqa: ARG001
-    raise NotImplementedError
+def _parse_tmd_exec(data: bytes) -> tuple[int, str] | None:
+    """Parse TMD without pyctr. Returns (version, exec content id) or None."""
+    if len(data) < 4:
+        return None
+    sig_type = int.from_bytes(data[0:4], "big")
+    sizes = _SIG_SIZES.get(sig_type)
+    if sizes is None:
+        return None
+    hs = 4 + sizes[0] + sizes[1]
+    if len(data) < hs + 0xC4:
+        return None
+    header = data[hs:hs + 0xC4]
+    version = int.from_bytes(header[0x9C:0x9E], "big")
+    count = int.from_bytes(header[0x9E:0xA0], "big")
+    recs_off = hs + 0xC4 + 0x900
+    if len(data) < recs_off + count * 0x30:
+        return None
+    for i in range(count):
+        rec = data[recs_off + i * 0x30:recs_off + (i + 1) * 0x30]
+        if int.from_bytes(rec[4:6], "big") == 0:
+            return (version, rec[0:4].hex())
+    return None
+
+
+def _complete_candidates(sd_mount_point: str, high: str, low: str) -> list[tuple[int, str]]:
+    """Complete (parseable TMD + non-empty exec .app) candidates, unsorted."""
+    found: list[tuple[int, str]] = []
+    try:
+        id1s = sorted(os.listdir(sd_mount_point))
+    except OSError:
+        return found
+    for id1 in id1s:
+        content = os.path.join(sd_mount_point, id1, "title", high, low, "content")
+        if not os.path.isdir(content):
+            continue
+        try:
+            names = sorted(os.listdir(content))
+        except OSError:
+            continue
+        for name in names:
+            if not name.lower().endswith(".tmd"):
+                continue
+            path = os.path.join(content, name)
+            try:
+                if os.path.getsize(path) > 1 << 20:
+                    continue
+                with open(path, "rb") as f:
+                    parsed = _parse_tmd_exec(f.read())
+            except OSError:
+                continue
+            if parsed is None:
+                continue
+            version, exec_id = parsed
+            app = os.path.join(content, f"{exec_id}.app")
+            try:
+                if os.path.isfile(app) and os.path.getsize(app) > 0:
+                    found.append((version, path))
+            except OSError:
+                continue
+    return found
+
+
+def _rank(candidates: list[tuple[int, str]]) -> str | None:
+    if not candidates:
+        return None
+    candidates.sort(key=lambda c: (-c[0], c[1]))
+    return candidates[0][1]
+
+
+def find_title(session: MountSession, title_id: str) -> TitleHandle:
+    """Resolve update-first, then mount sdtitle -> ncch -> exefs. Internal type."""
+    tid = (title_id or "").lower()
+    if not _TITLE_ID_RE.fullmatch(tid):
+        raise RunnerError("bad-title-id", sanitize(f"bad title id: {title_id}", get_secrets()))
+    high, low = tid[:8], tid[8:]
+    if high not in ("00040000", "0004000e"):
+        raise RunnerError("unsupported-category", sanitize(f"unsupported category: {high}", get_secrets()))
+    with _LOCK:
+        sd_mp = None
+        for child in session.children:
+            if child.kind == "sd":
+                sd_mp = child.mount_point
+                break
+        if sd_mp is None:
+            raise RunnerError("no-sd-mount", "session has no SD mount", False)
+        secrets = get_secrets([session.sd_root])
+        if high == "0004000e":
+            tmd_path = _rank(_complete_candidates(sd_mp, "0004000e", low))
+            if tmd_path is None:
+                raise RunnerError("title-not-found",
+                                  sanitize(f"no complete update title for {tid}", secrets))
+            resolved, kind = tid, "update"
+        else:
+            tmd_path = _rank(_complete_candidates(sd_mp, "0004000e", low))
+            if tmd_path is not None:
+                resolved, kind = "0004000e" + low, "update"
+            else:
+                tmd_path = _rank(_complete_candidates(sd_mp, "00040000", low))
+                if tmd_path is None:
+                    raise RunnerError("title-not-found",
+                                      sanitize(f"no complete title for {tid}", secrets))
+                resolved, kind = tid, "base"
+        handle_id = uuid.uuid4().hex
+        base = os.path.join(session.staging, handle_id)
+        created: list[InternalMount] = []
+        try:
+            boot9 = os.environ.get("NINFS_BOOT9_PATH", "")
+            sdtitle_mp = os.path.join(base, "sdtitle")
+            os.makedirs(sdtitle_mp, exist_ok=True)
+            proc = spawn_mount(_mount_args("sdtitle", [tmd_path], sdtitle_mp, ["--boot9", boot9]))
+            created.append(InternalMount(session.mount_id, "sdtitle", sdtitle_mp, proc,
+                                         handle_id, secrets))
+            session.children.append(created[-1])
+            wait_ready(proc, sdtitle_mp, lambda: os.path.exists(os.path.join(sdtitle_mp, "tmd.bin")))
+            try:
+                entries = os.listdir(sdtitle_mp)
+            except OSError as e:
+                raise RunnerError("title-listing-failed", sanitize(str(e), secrets))
+            ncchs = [e for e in entries if e.lower().endswith(".ncch")]
+            if not ncchs:
+                raise RunnerError("no-ncch", sanitize("no NCCH content found", secrets))
+            zero = sorted(n for n in ncchs if n.startswith("0000."))
+            if zero:
+                chosen = zero[0]
+            else:
+                def _size(name: str) -> int:
+                    try:
+                        return os.path.getsize(os.path.join(sdtitle_mp, name))
+                    except OSError:
+                        return -1
+                chosen = sorted(ncchs, key=lambda n: (-_size(n), n))[0]
+            ncch_mp = os.path.join(base, "ncch")
+            os.makedirs(ncch_mp, exist_ok=True)
+            proc = spawn_mount(_mount_args("ncch", [os.path.join(sdtitle_mp, chosen)],
+                                           ncch_mp, ["--boot9", boot9]))
+            created.append(InternalMount(session.mount_id, "ncch", ncch_mp, proc,
+                                         handle_id, secrets))
+            session.children.append(created[-1])
+            wait_ready(proc, ncch_mp, lambda: os.path.exists(os.path.join(ncch_mp, "exefs.bin")))
+            exefs_mp = os.path.join(base, "exefs")
+            os.makedirs(exefs_mp, exist_ok=True)
+            proc = spawn_mount(_mount_args("exefs", [os.path.join(ncch_mp, "exefs.bin")],
+                                           exefs_mp, ["--decompress-code"]))
+            created.append(InternalMount(session.mount_id, "exefs", exefs_mp, proc,
+                                         handle_id, secrets))
+            session.children.append(created[-1])
+            wait_ready(proc, exefs_mp, lambda: any(
+                os.path.exists(os.path.join(exefs_mp, n))
+                for n in ("code-decompressed.bin", "code.bin")))
+        except RunnerError as e:
+            leftovers = cleanup_core(created)
+            for m in created:
+                if m in session.children:
+                    session.children.remove(m)
+            for m in leftovers:
+                if m not in _RESIDUALS:
+                    _RESIDUALS.append(m)
+            raise RunnerError(e.code, sanitize(e.message_sanitized, secrets), bool(leftovers))
+        handle = TitleHandle(handle_id=handle_id, mount_id=session.mount_id,
+                             requested_title_id=tid, resolved_title_id=resolved, kind=kind,
+                             tmd_found=True, tmd_path=tmd_path)
+        session.title_handles[handle_id] = handle
+        return handle
 
 
 def extract_code(handle: TitleHandle, dest_rel: str) -> ExtractResult:  # noqa: ARG001
