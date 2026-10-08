@@ -40,6 +40,8 @@ _SIG_SIZES = {
 
 READY_TIMEOUT_S = 10.0
 READY_INTERVAL_S = 0.2
+_GONE_GRACE_S = 5.0
+_GONE_POLL_S = 0.5
 STDERR_TAIL_BYTES = 2000
 STDERR_BUFFER_CHUNKS = 64  # x 1KB reads ~= 64KB retained
 STOP_WAIT_S = 10.0
@@ -210,11 +212,25 @@ def wait_ready(
         time.sleep(min(READY_INTERVAL_S, max(0.0, deadline - time.monotonic())))
 
 
-def _staging_is_clean(mount_point: str) -> bool:
-    try:
-        return os.listdir(mount_point) == []
-    except OSError:
-        return False
+def _staging_is_gone(mount_point: str, grace_s: float | None = None) -> bool:
+    """WinFsp creates the leaf mount dir and deletes it on teardown.
+
+    Deletion after process death is asynchronous, so allow a grace period.
+    Success = the path is gone within grace. Anything still present means
+    teardown did not complete.
+    """
+    if grace_s is None:
+        grace_s = _GONE_GRACE_S
+    deadline = time.monotonic() + grace_s
+    while True:
+        try:
+            if not os.path.lexists(mount_point):
+                return True
+        except OSError:
+            return False
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(min(_GONE_POLL_S, max(0.0, deadline - time.monotonic())))
 
 
 def stop_proc(mount: InternalMount) -> bool:
@@ -228,7 +244,7 @@ def stop_proc(mount: InternalMount) -> bool:
             pass
         if proc.poll() is None:
             return False  # still alive: residual (no escalation on Windows)
-    return _staging_is_clean(mount.mount_point)
+    return _staging_is_gone(mount.mount_point)
 
 
 def cleanup_core(mounts: list[InternalMount]) -> list[InternalMount]:
@@ -422,7 +438,7 @@ def find_title(session: MountSession, title_id: str) -> TitleHandle:
         try:
             boot9 = os.environ.get("NINFS_BOOT9_PATH", "")
             sdtitle_mp = os.path.join(base, "sdtitle")
-            os.makedirs(sdtitle_mp, exist_ok=True)
+            os.makedirs(base, exist_ok=True)
             proc = spawn_mount(_mount_args("sdtitle", [tmd_path], sdtitle_mp, ["--boot9", boot9]))
             created.append(InternalMount(session.mount_id, "sdtitle", sdtitle_mp, proc,
                                          handle_id, secrets))
@@ -446,7 +462,6 @@ def find_title(session: MountSession, title_id: str) -> TitleHandle:
                         return -1
                 chosen = sorted(ncchs, key=lambda n: (-_size(n), n))[0]
             ncch_mp = os.path.join(base, "ncch")
-            os.makedirs(ncch_mp, exist_ok=True)
             proc = spawn_mount(_mount_args("ncch", [os.path.join(sdtitle_mp, chosen)],
                                            ncch_mp, ["--boot9", boot9]))
             created.append(InternalMount(session.mount_id, "ncch", ncch_mp, proc,
@@ -454,7 +469,6 @@ def find_title(session: MountSession, title_id: str) -> TitleHandle:
             session.children.append(created[-1])
             wait_ready(proc, ncch_mp, lambda: os.path.exists(os.path.join(ncch_mp, "exefs.bin")))
             exefs_mp = os.path.join(base, "exefs")
-            os.makedirs(exefs_mp, exist_ok=True)
             proc = spawn_mount(_mount_args("exefs", [os.path.join(ncch_mp, "exefs.bin")],
                                            exefs_mp, ["--decompress-code"]))
             created.append(InternalMount(session.mount_id, "exefs", exefs_mp, proc,
@@ -582,7 +596,8 @@ def mount_sd() -> MountSession:
             raise RunnerError("overlap", sanitize(str(e), ctx.secrets))
         staging = os.path.join(ws, ".mounts", uuid.uuid4().hex, "sd", "sd")
         _check_staging_area(ws, staging, ctx.secrets)
-        os.makedirs(staging, exist_ok=True)
+        # WinFsp creates the leaf mount dir itself; only ensure parents exist.
+        os.makedirs(os.path.dirname(staging), exist_ok=True)
         boot9 = os.environ.get("NINFS_BOOT9_PATH", "")
         movable = os.environ.get("NINFS_MOVABLE_PATH", "")
         proc = spawn_mount(

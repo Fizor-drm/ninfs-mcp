@@ -29,6 +29,7 @@ def _clean_state(monkeypatch, tmp_path):
     FakePopen.instances.clear()
     monkeypatch.setattr(runner.subprocess, "Popen", FakePopen)
     monkeypatch.setattr(runner, "READY_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(runner, "_GONE_GRACE_S", 0)
     monkeypatch.setenv("NINFS_WORKSPACE", str(tmp_path / "ws"))
     monkeypatch.setenv("NINFS_BOOT9_PATH", "C:\\k\\boot9.bin")
     monkeypatch.setenv("NINFS_MOVABLE_PATH", "C:\\k\\movable.sed")
@@ -299,11 +300,21 @@ def _serve_code(session, handle, data=b"decompressed-code-bytes"):
     """Materialize the served code-decompressed.bin the fake mount advertises."""
     for m in session.children:
         if m.handle_id == handle.handle_id and m.kind == "exefs":
+            os.makedirs(m.mount_point, exist_ok=True)  # WinFsp creates this live
             path = os.path.join(m.mount_point, "code-decompressed.bin")
             with open(path, "wb") as f:
                 f.write(data)
             return path
     raise AssertionError("no exefs mount for handle")
+
+
+def _teardown_served(session):
+    """Emulate WinFsp teardown: served mount leaves vanish entirely."""
+    import shutil
+
+    for m in session.children:
+        if m.kind != "sd" and os.path.lexists(m.mount_point):
+            shutil.rmtree(m.mount_point, ignore_errors=True)
 
 
 def test_extract_code_requires_decompressed_entry(tmp_path, monkeypatch):
@@ -392,12 +403,8 @@ def test_extract_code_happy_path_reuse_and_invalidation(tmp_path, monkeypatch):
     assert out2.sha256 == out.sha256
     import shutil
 
-    shutil.rmtree(tmp_path / "sd" / "id1")  # emulate FUSE unmount
-    for m in session.children:  # served bytes vanish with the mount
-        if m.kind == "exefs":
-            served = os.path.join(m.mount_point, "code-decompressed.bin")
-            if os.path.exists(served):
-                os.remove(served)
+    shutil.rmtree(tmp_path / "sd")  # WinFsp deletes the served tree itself
+    _teardown_served(session)
     assert runner.unmount("S").ok is True
     with pytest.raises(RunnerError):
         runner.extract_code(handle, "akaneko/code3.bin")
@@ -474,10 +481,12 @@ def test_find_title_multi_handle_coexistence(tmp_path):
     dirs = {os.path.dirname(m.mount_point) for m in session.children
             if m.handle_id}
     assert len(dirs) == 2  # distinct per-handle staging
-    # emulate FUSE unmount: served content vanishes, staging returns empty
+    # emulate FUSE unmount: served content vanishes, staging returns empty.
+    # WinFsp deletes the leaf mount dir itself, so remove the whole fixture.
     import shutil
 
-    shutil.rmtree(os.path.join(str(sdroot), "id1"))
+    _teardown_served(session)
+    shutil.rmtree(str(sdroot))
     summary = runner.unmount("S")
     assert summary.ok is True
     assert all(p.poll() is not None for p in FakePopen.instances)

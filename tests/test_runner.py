@@ -66,6 +66,7 @@ def clean_state(monkeypatch):
     runner._RESIDUALS.clear()
     FakePopen.instances.clear()
     monkeypatch.setattr(runner.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(runner, "_GONE_GRACE_S", 0)
     monkeypatch.setenv("NINFS_WORKSPACE", "C:\\ws")
     monkeypatch.setenv("NINFS_BOOT9_PATH", "C:\\k\\boot9.bin")
     monkeypatch.setenv("NINFS_MOVABLE_PATH", "C:\\k\\movable.sed")
@@ -254,11 +255,9 @@ def test_readiness_rejects_empty_dir_and_dead_proc(monkeypatch, tmp_path):
 
 def test_stop_idempotent_and_single_terminate(tmp_path):
     m = _mount(alive=False, tmp=tmp_path)
-    os.makedirs(m.mount_point, exist_ok=True)
     assert runner.stop_proc(m) is True
     assert m.proc.terminated is False  # nothing to do on exited proc
     m2 = _mount(alive=True, tmp=tmp_path)
-    os.makedirs(m2.mount_point, exist_ok=True)
     assert runner.stop_proc(m2) is True
     assert m2.proc.terminated is True
     assert m2.proc.killed is False  # no escalation on Windows
@@ -276,8 +275,6 @@ def test_cleanup_core_reverses_and_continues(tmp_path):
     order = []
     a = _mount(kind="sdtitle", tmp=tmp_path)
     b = _mount(kind="ncch", tmp=tmp_path)
-    for m in (a, b):
-        os.makedirs(m.mount_point, exist_ok=True)
     orig_stop = runner.stop_proc
     monkeypatch_fail = False
 
@@ -318,7 +315,6 @@ def test_unmount_order_ends_with_sd_and_reports(monkeypatch, tmp_path):
 
 def test_unmount_deleted_id_routes_to_residuals(tmp_path):
     m = _mount(session_id="gone", tmp=tmp_path)
-    os.makedirs(m.mount_point, exist_ok=True)
     runner._RESIDUALS.append(m)
     summary = runner.unmount("gone")
     assert summary.ok is True
@@ -330,7 +326,6 @@ def test_unmount_deleted_id_routes_to_residuals(tmp_path):
 
 def test_retry_residuals_recovers(tmp_path):
     m = _mount(session_id="s9", tmp=tmp_path)
-    os.makedirs(m.mount_point, exist_ok=True)
     runner._RESIDUALS.append(m)
     report = runner.retry_residuals()
     assert report.recovered == 1
