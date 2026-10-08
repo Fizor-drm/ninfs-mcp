@@ -93,11 +93,12 @@ MountSession (mount_id, sd_root)
 
 ### 常駐プロセス契約 (実測準拠)
 
-- 起動: 全 mount に `-f` を付け、`sys.executable -m ninfs <kind>` を `Popen(argv, stdout=DEVNULL, stderr=PIPE, stdin=DEVNULL)`。継承しない。
+- 起動: 全 mount に `-f` を付け、`sys.executable -m ninfs <kind>` を `Popen(argv, stdout=DEVNULL, stderr=PIPE, stdin=DEVNULL)`。継承しない。`Popen` オブジェクト自体が mount 本体である。
+- mount先のリーフディレクトリは事前作成しない。WinFspが作成し、解除時に削除する (既存dirへのmountは `in use` で失敗する)。親チェーンのみ事前作成する。
 - stdout は常に DEVNULL へ捨てる。stderr は起動直後から排出スレッドが有界バッファ (末尾64KB) へ送る。
 - 利用可能確認: `proc.poll() is None` かつ種別固有の必須エントリが見えること (sd=`<mp>/<ID1>/` 1件以上、sdtitle=`tmd.bin`、ncch=`exefs.bin`、exefs=`code-decompressed.bin`/`code.bin`)。
 - staging は作成前に既存祖先を解決し、管理領域 (`.mounts` 配下実体) に留まることを確認する。`.mounts` 自体が外部への junction 等の場合は mkdir・spawn ともにゼロで拒否する。
-- 停止は冪等にする: 終了済み proc には `terminate`/`wait` を行わない。ただし staging 確認 (空に戻ったこと) は必ず行い、非空・列挙不能は残存とする。稼働中は `terminate()` → `wait(timeout=10)` → proc終了 + staging空の確認。
+- 停止は冪等にする: 終了済み proc には `terminate`/`wait` を行わない。解除確認はリーフの消失で行うが、WinFspの削除は非同期のため猶予 (既定5秒) を見る。猶予内の消失は成功、残存は `_RESIDUALS` へ。
 - 発行前失敗 (選択後・返却前) もまず即時 cleanup を試み、解除不能分だけ `_RESIDUALS` へ。公開IDがない残存は次回 `unmount`/起動時/終了時に回収する。
 - MCP 終了時は `finally` を本体、`atexit` を補助として全残存に同手順を適用する。
 
