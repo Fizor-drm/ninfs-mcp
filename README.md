@@ -89,6 +89,15 @@ claude mcp add ninfs-mcp --transport stdio `
 
 **Quick bootstrap (Windows):** `powershell -ExecutionPolicy Bypass -File tools/setup.ps1` creates the venv, installs, and verifies `--help`.
 
+**One-line install with client auto-registration:**
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Fizor-drm/ninfs-mcp/main/tools/install.ps1))) `
+  -Workspace C:/analysis -Movable G:/keys/movable.sed -Boot9 G:/keys/boot9.bin
+```
+
+This clones/updates the repo to `%LOCALAPPDATA%\ninfs-mcp`, builds the venv, and registers the server into detected clients (Claude Code, OpenCode, Cursor, Windsurf — each config backed up first). Restart the AI client afterwards.
+
 ## Typical flow
 
 ```text

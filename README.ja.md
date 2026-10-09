@@ -89,6 +89,15 @@ claude mcp add ninfs-mcp --transport stdio `
 
 **手早い導入 (Windows):** `powershell -ExecutionPolicy Bypass -File tools/setup.ps1` でvenv作成・インストール・`--help` 確認まで行います。
 
+**クライアント自動登録付きの1行導入:**
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Fizor-drm/ninfs-mcp/main/tools/install.ps1))) `
+  -Workspace C:/analysis -Movable G:/keys/movable.sed -Boot9 G:/keys/boot9.bin
+```
+
+リポジトリを `%LOCALAPPDATA%\ninfs-mcp` に取得・更新し、venvを構築後、検出したクライアント (Claude Code・OpenCode・Cursor・Windsurf。各設定はバックアップ後に更新) へ自動登録します。完了後はAIクライアントの再起動が必要です。
+
 ## 典型フロー
 
 ```text
