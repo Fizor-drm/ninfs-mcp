@@ -110,6 +110,21 @@ detect_sd → mount_sd → find_title("000400000016C700")
 - Windows + WinFsp専用。Linux/macOSは対象外です。
 - 実機確認: 抽出までを検証済み。設計経緯は `docs/superpowers/specs/` を参照してください。
 
+## おすすめ併用ツール: Ghidra + CTR loader
+
+抽出したコードの解析には、次の構成で動作確認済みです:
+
+- **Ghidra 12.1.4** + Java 21以降。headlessは `JAVA_TOOL_OPTIONS=-Xmx8G` で起動 (`-Xmx` フラグは受け付けません)。
+- **ghidra-ctr-loader v1.3.0** (Raikaru fork) を `Ghidra/Extensions` へ。`CROLoader` / `CRSLoader` / `CtrCodeSetLoader` の登録を確認済み。
+
+```powershell
+# raw importの迂回路 (実績: 5.7MBの.codeから15,194関数)
+& "G:/tools/ghidra_12.1.4_PUBLIC/support/analyzeHeadless.bat" <projdir> <proj> `
+  -import <code.bin> -processor "ARM:LE:32:v7" -loader BinaryLoader -loader-baseAddr 100000
+```
+
+注意: `-loader` は表示名ではなくLoaderクラス名を指定します。`-baseAddr` は存在しません (`-loader-baseAddr <16進・0xなし>` を使用)。CXIコンテナの直接mountは一部タイトルでOOMします (loader側課題)。raw importが確実です。調査記録は `docs/superpowers/specs/` を参照してください。
+
 ## ライセンス
 
 MIT — [LICENSE](LICENSE) を参照。

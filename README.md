@@ -111,6 +111,21 @@ detect_sd → mount_sd → find_title("000400000016C700")
 - Real-hardware combination test status: verified with [Ghidra 12.1.4 + CTR loader](docs/superpowers/specs/2026-10-07-ninfs-mcp-design.md) for extraction; analysis-side notes live in your own workspace.
 - See `docs/superpowers/specs/` for the full design history.
 
+## Recommended companions: Ghidra + CTR loader
+
+To analyze the extracted code, this stack is verified working:
+
+- **Ghidra 12.1.4** (`G:\tools\ghidra_12.1.4_PUBLIC` used here) + Java 21+. Run headless with `JAVA_TOOL_OPTIONS=-Xmx8G` (`analyzeHeadless` rejects `-Xmx`).
+- **ghidra-ctr-loader v1.3.0** (Raikaru fork) into `Ghidra/Extensions`. Registered loaders confirmed: `CROLoader`, `CRSLoader`, `CtrCodeSetLoader`.
+
+```powershell
+# raw import fallback (verified: 15,194 functions from a 5.7MB .code)
+& "G:/tools/ghidra_12.1.4_PUBLIC/support/analyzeHeadless.bat" <projdir> <proj> `
+  -import <code.bin> -processor "ARM:LE:32:v7" -loader BinaryLoader -loader-baseAddr 100000
+```
+
+Notes: `-loader` takes the Loader **class** name, not the display name; `-baseAddr` does not exist (use `-loader-baseAddr <hex, no 0x>`). Direct CXI-container mounting OOMs on some titles (loader-side issue); raw import is the reliable path. See `docs/superpowers/specs/` for the investigation trail.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
