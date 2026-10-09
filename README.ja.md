@@ -1,0 +1,83 @@
+# ninfs-mcp
+
+[English](README.md)
+
+[ninfs](https://github.com/ihaveamac/ninfs)（3DSのSD・タイトル・ExeFSをマウントするツール）を、安全な読み取り専用5ツールとしてAIエージェントに公開するMCPサーバーです。
+
+「赤猫団の実行コードを解析できる状態にして」の一言で、SD検出から、展開済み `.code` のworkspaceへの抽出まで自律実行できます。SDの中身に書き込むことはありません。
+
+## 機能
+
+- 5ツールのみ: `detect_sd` / `mount_sd` / `find_title` / `extract_code` / `unmount`
+- 更新データ優先のタイトル解決（ベース `000400000016C700` → 更新 `0004000E0016C700` を優先）
+- 展開済みExeFSコードの抽出（SHA-256メタデータ付き。本文はAIに返さない）
+- read-onlyマウント強制。書込・削除APIは存在しない
+- 秘密情報の保護: `boot9.bin` / `movable.sed` の中身・SD復号キーをログにも応答にも出さない
+
+## 必要環境
+
+- Windows + WinFsp 2.x
+- Python 3.10以降
+- `ninfs==2.0`（+ `pyctr==0.7.6`。`haccrypto` のビルドにCコンパイラが必要。例: VS Build Tools）
+- 3DSのSDバックアップ（`Nintendo 3DS` フォルダ）、同本体の `movable.sed` と `boot9.bin`
+
+## インストール
+
+```powershell
+python -m venv .venv
+.venv\Scripts\python -m pip install -e .
+```
+
+## 設定
+
+| 変数 | 必須 | 意味 |
+|---|---|---|
+| `NINFS_SD_ROOT` | 任意 | `Nintendo 3DS` フォルダのパス（省略時は自動検出） |
+| `NINFS_MOVABLE_PATH` | 必須 | `movable.sed` のパス |
+| `NINFS_BOOT9_PATH` | 必須 | `boot9.bin` のパス |
+| `NINFS_WORKSPACE` | 必須 | 抽出先workspaceの絶対パス（なければ作成） |
+
+設定するのはパスのみです。中身を本サーバーが読むことはありません（マウントに必要な範囲を除く）。
+
+## MCPクライアント設定 (stdio)
+
+Claude Code / OpenCode（`opencode.jsonc` / `mcpServers`）:
+
+```json
+{
+  "ninfs-mcp": {
+    "command": "C:/path/to/ninfs-mcp/.venv/Scripts/python.exe",
+    "args": ["-m", "ninfs_mcp.server"],
+    "env": {
+      "NINFS_MOVABLE_PATH": "G:/keys/movable.sed",
+      "NINFS_BOOT9_PATH": "G:/keys/boot9.bin",
+      "NINFS_WORKSPACE": "C:/analysis/workspace"
+    }
+  }
+}
+```
+
+## 典型フロー
+
+```text
+detect_sd → mount_sd → find_title("000400000016C700")
+→ extract_code → unmount
+```
+
+`extract_code` は `{ dest_path, size, sha256, code_entry }`（メタデータのみ）を返します。
+
+## セキュリティモデル
+
+- マウントはread-only。SDへの書込・削除手段はありません。
+- AIは任意コマンドを実行できません。公開は上記5ツールのみです。
+- コピー先はworkspace配下に限定（`..`・絶対パス・ドライブ指定・UNC・予約名を拒否）。
+- 子プロセスのstdout（鍵情報を含む）は破棄し、stderrはマスクしてからログ・応答に渡します。
+
+## 制限事項
+
+- Windows + WinFsp専用。Linux/macOSは対象外です。
+- 実機確認: 抽出までを検証済み。設計経緯は `docs/superpowers/specs/` を参照してください。
+
+## ライセンス
+
+MIT — [LICENSE](LICENSE) を参照。
