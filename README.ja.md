@@ -1,139 +1,151 @@
 # ninfs-mcp
 
-[English](README.md)
+[English](README.md) · MIT · Windows専用
 
-[ninfs](https://github.com/ihaveamac/ninfs)（3DSのSD・タイトル・ExeFSをマウントするツール）を、安全な読み取り専用5ツールとしてAIエージェントに公開するMCPサーバーです。
+**3DSのSDカードを、AIが扱える形に変える——安全に。**
 
-「赤猫団の実行コードを解析できる状態にして」の一言で、SD検出から、展開済み `.code` のworkspaceへの抽出まで自律実行できます。SDの中身に書き込むことはありません。
+あなたが言うのは「赤猫団の実行コードを解析できる状態にして」の一言。
+あとはAIがやります: SDカードを見つけてread-onlyでマウントし、ベースより
+更新データを選び、展開済みのプログラムコードを取り出して後片付け。
+SDへの書込みは一切なし。鍵がマシンの外に出ることもありません。
 
-## 機能
+## 仕組み (30秒で理解)
 
-- 5ツールのみ: `detect_sd` / `mount_sd` / `find_title` / `extract_code` / `unmount`
-- 更新データ優先のタイトル解決（ベース `000400000016C700` → 更新 `0004000E0016C700` を優先）
-- 展開済みExeFSコードの抽出（SHA-256メタデータ付き。本文はAIに返さない）
-- read-onlyマウント強制。書込・削除APIは存在しない
-- 秘密情報の保護: `boot9.bin` / `movable.sed` の中身・SD復号キーをログにも応答にも出さない
-
-## 必要環境
-
-- Windows + WinFsp 2.x
-- Python 3.10以降
-- `ninfs==2.0`（+ `pyctr==0.7.6`。`haccrypto` のビルドにCコンパイラが必要。例: VS Build Tools）
-- 3DSのSDバックアップ（`Nintendo 3DS` フォルダ）、同本体の `movable.sed` と `boot9.bin`
-
-## インストール
-
-```powershell
-python -m venv .venv
-.venv\Scripts\python -m pip install -e .
+```text
+あなた ──「赤猫団のコードを解析して」──▶ AIエージェント
+                                              │
+                                              ▼
+                                    ┌── ninfs-mcp (5ツール) ┐
+                                    │ detect_sd → mount_sd   │
+                                    │ → find_title → extract │
+                                    │ → unmount              │
+                                    └──────────┬─────────────┘
+                                               ▼
+                                    workspace/akaneko/code.bin
+                                    (+ サイズ、SHA-256)
+                                               │
+                                               ▼
+                                    Ghidra / 解析作業
 ```
 
-## 設定
+AIに渡るのはファイルの*メタデータ* (パス・サイズ・ハッシュ) だけです。
+ROMの中身も、`movable.sed` / `boot9.bin` / SD復号キーも渡りません。
 
-| 変数 | 必須 | 意味 |
-|---|---|---|
-| `NINFS_SD_ROOT` | 任意 | `Nintendo 3DS` フォルダのパス（省略時は自動検出） |
-| `NINFS_MOVABLE_PATH` | 必須 | `movable.sed` のパス |
-| `NINFS_BOOT9_PATH` | 必須 | `boot9.bin` のパス |
-| `NINFS_WORKSPACE` | 必須 | 抽出先workspaceの絶対パス（なければ作成） |
+## 1行で導入
 
-設定するのはパスのみです。中身を本サーバーが読むことはありません（マウントに必要な範囲を除く）。
-
-## MCPクライアント設定 (stdio)
-
-Claude Code / OpenCode（`opencode.jsonc` / `mcpServers`）:
-
-```json
-{
-  "ninfs-mcp": {
-    "command": "C:/path/to/ninfs-mcp/.venv/Scripts/python.exe",
-    "args": ["-m", "ninfs_mcp.server"],
-    "env": {
-      "NINFS_MOVABLE_PATH": "G:/keys/movable.sed",
-      "NINFS_BOOT9_PATH": "G:/keys/boot9.bin",
-      "NINFS_WORKSPACE": "C:/analysis/workspace"
-    }
-  }
-}
-```
-
-### 他プロバイダ
-
-**Claude Code CLI (1行):**
-
-```powershell
-claude mcp add ninfs-mcp --transport stdio `
-  --env NINFS_MOVABLE_PATH=G:/keys/movable.sed `
-  --env NINFS_BOOT9_PATH=G:/keys/boot9.bin `
-  --env NINFS_WORKSPACE=C:/analysis/workspace `
-  -- C:/path/to/ninfs-mcp/.venv/Scripts/python.exe -m ninfs_mcp.server
-```
-
-**Claude Desktop:** `python tools/build_mcpb.py` でビルドし、`dist/ninfs-mcp.mcpb` をSettings → Extensionsへドラッグ＆ドロップ。4つのパスを入力するだけです。
-
-**Cursor / VS Code / Windsurf / Cline:** 上と同じJSON形式を各ホストのMCP設定ファイルに記載 (`mcp.json` / `mcp_config.json` / `cline_mcp_settings.json` / `servers` 配下の `.vscode/mcp.json`):
-
-```json
-{
-  "ninfs-mcp": {
-    "command": "C:/path/to/ninfs-mcp/.venv/Scripts/python.exe",
-    "args": ["-m", "ninfs_mcp.server"],
-    "env": {
-      "NINFS_MOVABLE_PATH": "G:/keys/movable.sed",
-      "NINFS_BOOT9_PATH": "G:/keys/boot9.bin",
-      "NINFS_WORKSPACE": "C:/analysis/workspace"
-    }
-  }
-}
-```
-
-**手早い導入 (Windows):** `powershell -ExecutionPolicy Bypass -File tools/setup.ps1` でvenv作成・インストール・`--help` 確認まで行います。
-
-**クライアント自動登録付きの1行導入:**
+事前準備 (初回のみ): Windows + [WinFsp](https://winfsp.dev/rel/) 2.x、
+C++コンパイラ (依存1件のビルド用)、SDバックアップ、その本体の
+`movable.sed` + `boot9.bin`。
 
 ```powershell
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Fizor-drm/ninfs-mcp/main/tools/install.ps1))) `
   -Workspace C:/analysis -Movable G:/keys/movable.sed -Boot9 G:/keys/boot9.bin
 ```
 
-リポジトリを `%LOCALAPPDATA%\ninfs-mcp` に取得・更新し、venvを構築後、検出したクライアント (Claude Code・OpenCode・Cursor・Windsurf。各設定はバックアップ後に更新) へ自動登録します。完了後はAIクライアントの再起動が必要です。
+コード取得・隔離環境の構築から、見つけたAIクライアント
+(Claude Code・OpenCode・Cursor・Windsurf) への登録まで自動で行います
+(既存設定はバックアップ後に更新)。最後にAIクライアントを再起動してください。
 
-## 典型フロー
+手動が良ければ: `powershell -File tools/setup.ps1` の後、
+`.venv\Scripts\python.exe -m ninfs_mcp.server` をクライアントに指定します
+(例は下記)。
 
-```text
-detect_sd → mount_sd → find_title("000400000016C700")
-→ extract_code → unmount
-```
+## 教えるのは4つのパスだけ
 
-`extract_code` は `{ dest_path, size, sha256, code_entry }`（メタデータのみ）を返します。
+| 設定 | 内容 | 必須? |
+|---|---|---|
+| `NINFS_WORKSPACE` | 抽出先フォルダ (なければ作成) | はい |
+| `NINFS_MOVABLE_PATH` | `movable.sed` の場所 | はい |
+| `NINFS_BOOT9_PATH` | `boot9.bin` の場所 | はい |
+| `NINFS_SD_ROOT` | `Nintendo 3DS` フォルダの場所 | いいえ (自動検出) |
 
-## セキュリティモデル
+設定するのは*パス*だけです。中身を読むのはマウントに必要な範囲のninfsだけです。
 
-- マウントはread-only。SDへの書込・削除手段はありません。
-- AIは任意コマンドを実行できません。公開は上記5ツールのみです。
-- コピー先はworkspace配下に限定（`..`・絶対パス・ドライブ指定・UNC・予約名を拒否）。
-- 子プロセスのstdout（鍵情報を含む）は破棄し、stderrはマスクしてからログ・応答に渡します。
+## AIクライアントの接続方法
 
-## 制限事項
-
-- Windows + WinFsp専用。Linux/macOSは対象外です。
-- 実機確認: 抽出までを検証済み。設計経緯は `docs/superpowers/specs/` を参照してください。
-
-## おすすめ併用ツール: Ghidra + CTR loader
-
-抽出したコードの解析には、次の構成で動作確認済みです:
-
-- **Ghidra 12.1.4** + Java 21以降。headlessは `JAVA_TOOL_OPTIONS=-Xmx8G` で起動 (`-Xmx` フラグは受け付けません)。
-- **ghidra-ctr-loader v1.3.0** (Raikaru fork) を `Ghidra/Extensions` へ。`CROLoader` / `CRSLoader` / `CtrCodeSetLoader` の登録を確認済み。
+<details>
+<summary>Claude Code CLI (1行)</summary>
 
 ```powershell
-# raw importの迂回路 (実績: 5.7MBの.codeから15,194関数)
-& "G:/tools/ghidra_12.1.4_PUBLIC/support/analyzeHeadless.bat" <projdir> <proj> `
+claude mcp add ninfs-mcp --transport stdio `
+  --env NINFS_MOVABLE_PATH=G:/keys/movable.sed `
+  --env NINFS_BOOT9_PATH=G:/keys/boot9.bin `
+  --env NINFS_WORKSPACE=C:/analysis `
+  -- C:/path/to/ninfs-mcp/.venv/Scripts/python.exe -m ninfs_mcp.server
+```
+</details>
+
+<details>
+<summary>Claude Code / OpenCode (JSON)</summary>
+
+```json
+{
+  "ninfs-mcp": {
+    "command": "C:/path/to/ninfs-mcp/.venv/Scripts/python.exe",
+    "args": ["-m", "ninfs_mcp.server"],
+    "env": {
+      "NINFS_MOVABLE_PATH": "G:/keys/movable.sed",
+      "NINFS_BOOT9_PATH": "G:/keys/boot9.bin",
+      "NINFS_WORKSPACE": "C:/analysis/workspace"
+    }
+  }
+}
+```
+</details>
+
+<details>
+<summary>Claude Desktop (ワンクリック)</summary>
+
+`python tools/build_mcpb.py` でビルドし、`dist/ninfs-mcp.mcpb` を
+Settings → Extensionsへドラッグ＆ドロップ。4つのパスを入力するだけです。
+</details>
+
+<details>
+<summary>Cursor / VS Code / Windsurf / Cline</summary>
+
+上と同じJSONを各ホストのMCP設定ファイルに記載
+(`mcp.json` / `mcp_config.json` / `cline_mcp_settings.json` /
+`servers` 配下の `.vscode/mcp.json`)。
+</details>
+
+## AIにできること・できないこと
+
+| できる | できない |
+|---|---|
+| SD検出・read-onlyマウント | SDへの書込・削除 |
+| 更新データをベースより優先選択 | 任意コマンドの実行 (5ツールのみ) |
+| workspaceへのコピー | ファイル中身・鍵・秘密の閲覧 |
+| 全解除 + 後片付け | マウントの置き去り (終了時に自動解除) |
+
+コピー先はworkspace配下に固定。`..`・絶対パス・ドライブ指定・UNC・予約名は
+すべて拒否されます。
+
+## Ghidraで解析する (おすすめ)
+
+動作確認済みの組合せ: **Ghidra 12.1.4** + Java 21、
+**ghidra-ctr-loader v1.3.0** を `Ghidra/Extensions` へ。headless起動は
+`JAVA_TOOL_OPTIONS=-Xmx8G` で (`analyzeHeadless` 自体は `-Xmx` を受け付けません)。
+
+```powershell
+& "<ghidra>/support/analyzeHeadless.bat" <projdir> <proj> `
   -import <code.bin> -processor "ARM:LE:32:v7" -loader BinaryLoader -loader-baseAddr 100000
 ```
 
-注意: `-loader` は表示名ではなくLoaderクラス名を指定します。`-baseAddr` は存在しません (`-loader-baseAddr <16進・0xなし>` を使用)。CXIコンテナの直接mountは一部タイトルでOOMします (loader側課題)。raw importが確実です。調査記録は `docs/superpowers/specs/` を参照してください。
+5.7MBの `.code` から15,194関数を確認済み。ハマりどころ2件:
+`-loader` は表示名ではなくLoader**クラス**名、`-baseAddr` は存在しない
+(`-loader-baseAddr <16進・0xなし>` を使う)。CXIコンテナの直接mountは
+一部タイトルでメモリ不足になるため、raw importが確実です。
 
-## ライセンス
+## 困ったら
 
-MIT — [LICENSE](LICENSE) を参照。
+- **`--help` でFUSEエラー** → WinFspが未導入か未起動です。`--help` 表示にも必要です。
+- **`haccrypto` がビルドできない** → Visual Studio Build Toolsの
+  「C++ によるデスクトップ開発」を入れて、インストーラーを再実行してください。
+- **マウント失敗・ハング** → マウント先は事前に作らないでください。
+  WinFspが作成・削除します。
+- **インストール中のUAC** → ツールチェーン/SDKのセットアップです。許可してください。
+
+## 開発者向け
+
+設計経緯は `docs/superpowers/specs/` にあります。テスト67件・全mock —
+`python -m pytest tests/`。MIT — [LICENSE](LICENSE) を参照。
