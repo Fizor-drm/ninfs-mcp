@@ -166,5 +166,4 @@ don't have to:
 
 ## For developers
 
-Design history lives in `docs/superpowers/specs/`. 67 tests, all mocked —
-`python -m pytest tests/`. MIT — see [LICENSE](LICENSE).
+67 tests, all mocked — `python -m pytest tests/`. MIT — see [LICENSE](LICENSE).

@@ -165,5 +165,4 @@ Settings → Extensionsへドラッグ＆ドロップ。4つのパスを入力�
 
 ## 開発者向け
 
-設計経緯は `docs/superpowers/specs/` にあります。テスト67件・全mock —
-`python -m pytest tests/`。MIT — [LICENSE](LICENSE) を参照。
+テスト67件・全mock — `python -m pytest tests/`。MIT — [LICENSE](LICENSE) を参照。
