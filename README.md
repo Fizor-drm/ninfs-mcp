@@ -57,6 +57,38 @@ Claude Code / OpenCode (`opencode.jsonc` / `mcpServers`):
 }
 ```
 
+### Other providers
+
+**Claude Code CLI (one line):**
+
+```powershell
+claude mcp add ninfs-mcp --transport stdio `
+  --env NINFS_MOVABLE_PATH=G:/keys/movable.sed `
+  --env NINFS_BOOT9_PATH=G:/keys/boot9.bin `
+  --env NINFS_WORKSPACE=C:/analysis/workspace `
+  -- C:/path/to/ninfs-mcp/.venv/Scripts/python.exe -m ninfs_mcp.server
+```
+
+**Claude Desktop:** build once with `python tools/build_mcpb.py`, then drag `dist/ninfs-mcp.mcpb` into Settings → Extensions and fill in the four paths.
+
+**Cursor / VS Code / Windsurf / Cline:** same JSON shape as above, in the host's MCP config file (`mcp.json` / `mcp_config.json` / `cline_mcp_settings.json` / `.vscode/mcp.json` under `servers`):
+
+```json
+{
+  "ninfs-mcp": {
+    "command": "C:/path/to/ninfs-mcp/.venv/Scripts/python.exe",
+    "args": ["-m", "ninfs_mcp.server"],
+    "env": {
+      "NINFS_MOVABLE_PATH": "G:/keys/movable.sed",
+      "NINFS_BOOT9_PATH": "G:/keys/boot9.bin",
+      "NINFS_WORKSPACE": "C:/analysis/workspace"
+    }
+  }
+}
+```
+
+**Quick bootstrap (Windows):** `powershell -ExecutionPolicy Bypass -File tools/setup.ps1` creates the venv, installs, and verifies `--help`.
+
 ## Typical flow
 
 ```text

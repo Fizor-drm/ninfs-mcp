@@ -57,6 +57,38 @@ Claude Code / OpenCode（`opencode.jsonc` / `mcpServers`）:
 }
 ```
 
+### 他プロバイダ
+
+**Claude Code CLI (1行):**
+
+```powershell
+claude mcp add ninfs-mcp --transport stdio `
+  --env NINFS_MOVABLE_PATH=G:/keys/movable.sed `
+  --env NINFS_BOOT9_PATH=G:/keys/boot9.bin `
+  --env NINFS_WORKSPACE=C:/analysis/workspace `
+  -- C:/path/to/ninfs-mcp/.venv/Scripts/python.exe -m ninfs_mcp.server
+```
+
+**Claude Desktop:** `python tools/build_mcpb.py` でビルドし、`dist/ninfs-mcp.mcpb` をSettings → Extensionsへドラッグ＆ドロップ。4つのパスを入力するだけです。
+
+**Cursor / VS Code / Windsurf / Cline:** 上と同じJSON形式を各ホストのMCP設定ファイルに記載 (`mcp.json` / `mcp_config.json` / `cline_mcp_settings.json` / `servers` 配下の `.vscode/mcp.json`):
+
+```json
+{
+  "ninfs-mcp": {
+    "command": "C:/path/to/ninfs-mcp/.venv/Scripts/python.exe",
+    "args": ["-m", "ninfs_mcp.server"],
+    "env": {
+      "NINFS_MOVABLE_PATH": "G:/keys/movable.sed",
+      "NINFS_BOOT9_PATH": "G:/keys/boot9.bin",
+      "NINFS_WORKSPACE": "C:/analysis/workspace"
+    }
+  }
+}
+```
+
+**手早い導入 (Windows):** `powershell -ExecutionPolicy Bypass -File tools/setup.ps1` でvenv作成・インストール・`--help` 確認まで行います。
+
 ## 典型フロー
 
 ```text

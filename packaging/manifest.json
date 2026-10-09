@@ -1,0 +1,87 @@
+{
+  "manifest_version": "0.4",
+  "name": "ninfs-mcp",
+  "display_name": "ninfs-mcp (3DS SD analysis)",
+  "version": "0.1.0",
+  "description": "Expose ninfs (3DS SD/title/ExeFS mounter) to AI agents as five safe, read-only MCP tools.",
+  "long_description": "Detect the SD card, mount it read-only, resolve titles update-first, extract the decompressed ExeFS code into a workspace, and unmount. Requires Windows + WinFsp, ninfs dependencies, an SD backup, movable.sed and boot9.bin.",
+  "author": {
+    "name": "Fizor"
+  },
+  "server": {
+    "type": "uv",
+    "entry_point": "run_server.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "${__dirname}",
+        "run_server.py"
+      ],
+      "env": {
+        "NINFS_SD_ROOT": "${user_config.sd_root}",
+        "NINFS_MOVABLE_PATH": "${user_config.movable_sed}",
+        "NINFS_BOOT9_PATH": "${user_config.boot9_bin}",
+        "NINFS_WORKSPACE": "${user_config.workspace}"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "detect_sd",
+      "description": "Detect the 3DS SD card"
+    },
+    {
+      "name": "mount_sd",
+      "description": "Mount the SD card read-only"
+    },
+    {
+      "name": "find_title",
+      "description": "Resolve a title update-first and mount down to ExeFS"
+    },
+    {
+      "name": "extract_code",
+      "description": "Copy the decompressed code into the workspace"
+    },
+    {
+      "name": "unmount",
+      "description": "Reverse-clean a mount session"
+    }
+  ],
+  "keywords": ["3ds", "ninfs", "reverse-engineering", "ghidra", "mcp"],
+  "license": "MIT",
+  "user_config": {
+    "movable_sed": {
+      "type": "file",
+      "title": "movable.sed path",
+      "description": "Path to movable.sed dumped from the console",
+      "required": true
+    },
+    "boot9_bin": {
+      "type": "file",
+      "title": "boot9.bin path",
+      "description": "Path to boot9.bin dumped from the console",
+      "required": true
+    },
+    "workspace": {
+      "type": "directory",
+      "title": "Workspace directory",
+      "description": "Absolute path of the extraction workspace",
+      "required": true
+    },
+    "sd_root": {
+      "type": "string",
+      "title": "SD root (optional)",
+      "description": "Path to the Nintendo 3DS folder; auto-detected when empty",
+      "default": "",
+      "required": false
+    }
+  },
+  "compatibility": {
+    "platforms": ["win32"],
+    "runtimes": {
+      "python": ">=3.10.0 <4"
+    }
+  }
+}

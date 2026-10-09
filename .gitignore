@@ -3,3 +3,5 @@ __pycache__/
 .superpowers/
 graft/
 *.egg-info/
+dist/
+*.mcpb
